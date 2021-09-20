@@ -1,0 +1,86 @@
+#!/bin/sh
+set -e
+
+VERBOSE=true
+
+# If softlinks are maintained, then either under /boot or otherwise /. If
+# neither location contains a vmlinuz, then no softlinks are maintained.
+if [ -L /boot/vmlinu? ]; then
+	dir="/boot/"
+elif [ -L /vmlinu? ]; then
+	dir="/"
+else
+	dir=""
+fi
+
+if [ "$dir" = "" ]; then
+	exit 0
+fi
+
+# avoid running multiple times
+if [ -n "$DEB_MAINT_PARAMS" ]; then
+	eval set -- "$DEB_MAINT_PARAMS"
+	if [ -z "$1" ] || [ "$1" != "configure" ]; then
+		exit 0
+	fi
+fi
+
+create_link() {
+	local tgt=$1
+	local src=$2
+	local dir=$(dirname $src)
+	local kver=${tgt#initrd.img*-}
+
+	# Running installkernel multiple times with the same kernel will
+	# create backups of the binary in the form of vmlinu?-<ver>.old
+	# However by then the modules have been replaced and also there is
+	# no way to build the initramfs with that name.
+	if [ ! -f "${dir}/${tgt}" ]; then
+		case $tgt in
+		initrd.img-*.old)
+			# installkernel should create a copy of the initrd
+			# when it copies a kernel image. This is only a hack
+			# before there is no matching file at all.
+			kver=${kver%.old}
+			cp ${dir}/initrd.img-$kver ${dir}/$tgt
+			;;
+		*)
+			# This is present just as double safety net. By all means
+			# the actual initrd should already be created by a previous
+			# postinst script.
+			INITRAMFS_TOOLS_KERNEL_HOOK=1 \
+				update-initramfs -c -k ${kver}
+			;;
+		esac
+	fi
+
+	$VERBOSE && echo "Softlink: ${src} -> ${tgt}"
+	cd ${dir} && ln -sf ${tgt} ${src}
+}
+
+$VERBOSE && echo "Testing softlinks in $dir..."
+
+for f in $(find $dir -maxdepth 1 -regex '.*vmlinu.\(\.old\)?'); do
+	if [ -e $f ]; then
+		kernel=$(basename $f)
+		initrd="initrd.img${kernel#vmlinu?}"
+		tgt_kernel="$(readlink $f)"
+		tgt_initrd="initrd.img${tgt_kernel#vmlinu?}"
+		if [ ! -L "${dir}${initrd}" -o ! -e "${dir}${initrd}" ]; then
+			$VERBOSE && echo "${dir}${initrd} does not exist or is not a link"
+			create_link ${tgt_initrd} ${dir}${initrd}
+		else
+			cur_initrd=$(readlink ${dir}${initrd})
+			if [ "${cur_initrd}" != "${tgt_initrd}" ]; then
+				$VERBOSE && echo "${dir}${initrd} invalid target (${cur_initrd})"
+				create_link ${tgt_initrd} ${dir}${initrd}
+			else
+				$VERBOSE && echo "${dir}${initrd} -> ${tgt_initrd} (ok)"
+			fi
+		fi
+	else
+		$VERBOSE && echo "Broken link: $f (skip)"
+	fi
+done
+
+exit 0
